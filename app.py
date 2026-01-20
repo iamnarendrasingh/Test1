@@ -35,16 +35,22 @@ def pick_col(df, candidates):
 
 def bar_with_labels(data, x_col, y_col, x_title, y_title):
     base = alt.Chart(data)
+
     bar = base.mark_bar().encode(
-        x=alt.X(f"{x_col}:N", title=x_title),
+        x=alt.X(f"{x_col}:N", title=x_title, sort="-y"),
         y=alt.Y(f"{y_col}:Q", title=y_title),
-        tooltip=[x_col, y_col],
+        tooltip=[
+            alt.Tooltip(f"{x_col}:N", title=x_title),
+            alt.Tooltip(f"{y_col}:Q", title=y_title, format=",.0f"),
+        ],
     )
-    text = base.mark_text(dy=-6).encode(
-        x=x_col,
-        y=y_col,
-        text=alt.Text(y_col, format=".0f"),
+
+    text = base.mark_text(dy=-6, fontSize=12).encode(
+        x=alt.X(f"{x_col}:N", sort="-y"),
+        y=alt.Y(f"{y_col}:Q"),
+        text=alt.Text(f"{y_col}:Q", format=",.0f"),
     )
+
     return bar + text
 
 def bucket_0_to_7_plus(series):
@@ -99,7 +105,7 @@ metric_cols = [
 df = safe_numeric(df, ["SessionAttended", "Total"] + metric_cols)
 
 # -----------------------------
-# Upload summaries
+# Upload summaries (includes StateName + Gender graphs)
 # -----------------------------
 st.subheader("Upload Summary")
 
@@ -111,7 +117,7 @@ c1.metric("Total Submissions (Rows)", f"{total_rows:,}")
 c2.metric("Total Children (Unique)", f"{int(total_children):,}" if not np.isnan(total_children) else "NA")
 c3.metric("Unique States", df[col_state].nunique() if col_state else "NA")
 
-# ---- StateName-wise summary table + PIE CHART ----
+# ---- StateName-wise summary + pie + State x Gender chart ----
 if col_state:
     st.markdown("### StateName-wise Submissions (Rows)")
 
@@ -126,8 +132,7 @@ if col_state:
 
     st.dataframe(state_counts, use_container_width=True)
 
-    # Pie charts get unreadable with too many slices.
-    # So we show Top 10 + "Others"
+    # Pie: Top 10 + Others (keeps pie readable)
     top_n = 10
     if len(state_counts) > top_n:
         top = state_counts.head(top_n).copy()
@@ -143,17 +148,58 @@ if col_state:
             alt.Tooltip("StateName:N", title="StateName"),
             alt.Tooltip("Rows:Q", title="Rows", format=",.0f"),
         ],
-    ).properties(height=350)
+    ).properties(height=320)
 
     st.altair_chart(pie, use_container_width=True)
+
+    # NEW: StateName-wise submissions split by Gender (stacked bar)
+    if col_gender:
+        st.markdown("### StateName-wise Submissions by Gender (Stacked)")
+
+        sg = df[[col_state, col_gender]].copy()
+        sg[col_state] = sg[col_state].fillna("Unknown").astype(str)
+        sg[col_gender] = sg[col_gender].fillna("Unknown").astype(str)
+
+        sg_counts = (
+            sg.groupby([col_state, col_gender])
+            .size()
+            .reset_index(name="Rows")
+        )
+
+        # Keep chart readable: show top N states by total rows, others aggregated into "Others"
+        totals = sg_counts.groupby(col_state)["Rows"].sum().sort_values(ascending=False)
+        top_states = set(totals.head(10).index.tolist())
+
+        sg_counts[col_state] = sg_counts[col_state].apply(lambda x: x if x in top_states else "Others")
+        sg_counts = sg_counts.groupby([col_state, col_gender], as_index=False)["Rows"].sum()
+
+        stacked = alt.Chart(sg_counts).mark_bar().encode(
+            x=alt.X(f"{col_state}:N", title="StateName", sort="-y", axis=alt.Axis(labelAngle=-30)),
+            y=alt.Y("Rows:Q", title="Submissions (Rows)"),
+            color=alt.Color(f"{col_gender}:N", title="Gender"),
+            tooltip=[
+                alt.Tooltip(f"{col_state}:N", title="StateName"),
+                alt.Tooltip(f"{col_gender}:N", title="Gender"),
+                alt.Tooltip("Rows:Q", title="Rows", format=",.0f"),
+            ],
+        ).properties(height=380)
+
+        st.altair_chart(stacked, use_container_width=True)
+
+        # Optional: table view State x Gender
+        pivot = sg_counts.pivot_table(index=col_state, columns=col_gender, values="Rows", fill_value=0, aggfunc="sum")
+        pivot["Total"] = pivot.sum(axis=1)
+        pivot = pivot.sort_values("Total", ascending=False).reset_index()
+        st.dataframe(pivot, use_container_width=True)
+
 else:
     st.info("Column `StateName` not found; state-wise submission summary is not available.")
 
-# Gender summary
+# Gender summary (overall)
 if col_gender:
     st.markdown("### Gender-wise Submissions (Rows)")
     st.dataframe(
-        df[col_gender].value_counts(dropna=False).reset_index(name="Rows").rename(columns={"index": "Gender"}),
+        df[col_gender].fillna("Unknown").astype(str).value_counts(dropna=False).reset_index(name="Rows").rename(columns={"index": "Gender"}),
         use_container_width=True
     )
 
