@@ -93,6 +93,16 @@ def line_with_point_labels(
 
     return line + points + labels
 
+def session_attended_bucket(s: pd.Series) -> pd.Series:
+    """
+    Buckets for SessionAttended:
+      0, 1-3, 4-5, 6-10, 11-15, 16-20, 21-30, 31+
+    """
+    s = pd.to_numeric(s, errors="coerce").fillna(0)
+    bins = [-0.1, 0, 3, 5, 10, 15, 20, 30, np.inf]
+    labels = ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
+    return pd.cut(s, bins=bins, labels=labels, include_lowest=True)
+
 # -----------------------------
 # UI - Header
 # -----------------------------
@@ -121,6 +131,7 @@ col_proj   = pick_col(df, ["ProjectID", "ProjectId", "Project", "project"])
 col_child  = pick_col(df, ["ChildId", "ChildID", "child_id", "childid"])
 col_gender = pick_col(df, ["Gender", "gender"])
 col_month  = pick_col(df, ["DoJ_YM_Str", "YM", "Month", "month", "YearMonth"])
+col_progsub = pick_col(df, ["ProgramSubType", "ProgramSubTypeName", "Program Sub Type", "programsubtype"])
 
 # Convert numerics
 df = safe_numeric(df, [
@@ -139,6 +150,14 @@ if "SessionAttended" in df.columns and "Total" in df.columns:
 if "AttendancePct" in df.columns:
     df["AttendancePct"] = pd.to_numeric(df["AttendancePct"], errors="coerce")
     df.loc[(df["AttendancePct"] < 0) | (df["AttendancePct"] > 100), "AttendancePct"] = np.nan
+
+# Create SessionAttended bucket column (for KPI + chart)
+if "SessionAttended" in df.columns:
+    df["SessionAttendedBucket"] = session_attended_bucket(df["SessionAttended"]).astype(str)
+else:
+    df["SessionAttendedBucket"] = "NA"
+
+bucket_order = ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
 
 # -----------------------------
 # Sidebar Filters
@@ -164,13 +183,22 @@ if col_proj:
     if selected_proj != "All":
         f = f[f[col_proj] == selected_proj]
 
+# NEW FILTER: ProgramSubType
+if col_progsub:
+    progsubs = sorted([x for x in f[col_progsub].dropna().unique()])
+    selected_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
+    if selected_progsub != "All":
+        f = f[f[col_progsub] == selected_progsub]
+else:
+    selected_progsub = "NA"
+
 st.sidebar.divider()
 show_raw = st.sidebar.checkbox("Show raw data table", value=False)
 
 # -----------------------------
 # KPIs
 # -----------------------------
-kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+k1, k2, k3, k4, k5 = st.columns(5)
 
 records = len(f)
 unique_children = f[col_child].nunique() if col_child else np.nan
@@ -178,11 +206,27 @@ attended_sum = f["SessionAttended"].sum() if "SessionAttended" in f.columns else
 total_sum = f["Total"].sum() if "Total" in f.columns else np.nan
 overall_pct = (attended_sum / total_sum * 100) if (isinstance(total_sum, (int, float, np.number)) and total_sum and total_sum > 0) else np.nan
 
-kpi1.metric("Records", f"{records:,}")
-kpi2.metric("Unique Children", f"{int(unique_children):,}" if not np.isnan(unique_children) else "NA")
-kpi3.metric("Sessions Attended", f"{attended_sum:,.0f}" if not np.isnan(attended_sum) else "NA")
-kpi4.metric("Total Sessions", f"{total_sum:,.0f}" if not np.isnan(total_sum) else "NA")
-kpi5.metric("Attendance %", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
+k1.metric("Records", f"{records:,}")
+k2.metric("Unique Children", f"{int(unique_children):,}" if not np.isnan(unique_children) else "NA")
+k3.metric("Sessions Attended", f"{attended_sum:,.0f}" if not np.isnan(attended_sum) else "NA")
+k4.metric("Total Sessions", f"{total_sum:,.0f}" if not np.isnan(total_sum) else "NA")
+k5.metric("Attendance %", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
+
+# Additional KPI row: show bucket counts as KPI cards
+st.subheader("Session Attended Buckets (Counts)")
+bucket_cols = st.columns(len(bucket_order))
+
+if "SessionAttended" in f.columns:
+    bucket_counts = (
+        f["SessionAttendedBucket"]
+        .value_counts()
+        .reindex(bucket_order, fill_value=0)
+        .astype(int)
+    )
+    for i, b in enumerate(bucket_order):
+        bucket_cols[i].metric(b, f"{bucket_counts[b]:,}")
+else:
+    st.info("SessionAttended column not available; cannot compute buckets.")
 
 st.divider()
 
@@ -219,31 +263,29 @@ with c1:
         st.warning("Month column or required numeric columns not found. Expected: DoJ_YM_Str (or similar), SessionAttended, Total.")
 
 with c2:
-    st.subheader("Attendance Distribution (Record Level) with labels")
+    st.subheader("SessionAttended Buckets (with labels)")
 
-    if "AttendancePct" in f.columns:
-        hist_data = f["AttendancePct"].dropna()
-        if len(hist_data) > 0:
-            bins = [0, 20, 40, 60, 80, 100]
-            labels = ["0–20", "20–40", "40–60", "60–80", "80–100"]
+    if "SessionAttended" in f.columns:
+        bdf = (
+            f["SessionAttendedBucket"]
+            .value_counts()
+            .reindex(bucket_order, fill_value=0)
+            .reset_index()
+        )
+        bdf.columns = ["Bucket", "Count"]
+        bdf["Bucket"] = bdf["Bucket"].astype(str)
 
-            binned = pd.cut(hist_data, bins=bins, labels=labels, include_lowest=True)
-            counts = binned.value_counts().reindex(labels, fill_value=0)
-
-            hist_df = pd.DataFrame({"Attendance Band": labels, "Count": counts.values})
-            chart = bar_with_labels(
-                hist_df,
-                x_col="Attendance Band",
-                y_col="Count",
-                x_title="Attendance Band",
-                y_title="Record Count",
-                value_format=".0f",
-            )
-            st.altair_chart(chart, use_container_width=True)
-        else:
-            st.info("No non-null attendance % values after filtering.")
+        chart = bar_with_labels(
+            bdf,
+            x_col="Bucket",
+            y_col="Count",
+            x_title="SessionAttended Bucket",
+            y_title="Record Count",
+            value_format=".0f",
+        )
+        st.altair_chart(chart, use_container_width=True)
     else:
-        st.warning("AttendancePct could not be computed (need SessionAttended and Total).")
+        st.info("SessionAttended not available.")
 
 st.divider()
 
@@ -301,7 +343,7 @@ with c4:
 st.divider()
 
 # -----------------------------
-# Optional: Additional labelled chart (Top 10 Projects)
+# Top Projects table + labeled chart
 # -----------------------------
 st.subheader("Top Projects by Attendance % (table + labeled chart)")
 
@@ -310,10 +352,8 @@ if col_proj and "SessionAttended" in f.columns and "Total" in f.columns:
     p["AttendancePct"] = np.where(p["Total"] > 0, (p["SessionAttended"] / p["Total"]) * 100, np.nan)
     p = p.sort_values("AttendancePct", ascending=False)
 
-    # Table
     st.dataframe(p.head(20), use_container_width=True)
 
-    # Labeled bar chart (top 10)
     top10 = p.head(10).copy()
     top10[col_proj] = top10[col_proj].astype(str)
 
