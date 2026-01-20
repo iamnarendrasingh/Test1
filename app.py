@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-st.set_page_config(page_title="YM Attendance Dashboard", layout="wide")
+st.set_page_config(page_title="Session Visits Dashboard", layout="wide")
 
 # -----------------------------
 # Helpers
@@ -117,15 +117,10 @@ def ordered_buckets_for_program_subtype(program_subtype: str) -> list[str]:
 
     return ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
 
-def normalize_state(s: str) -> str:
-    if s is None:
-        return ""
-    return str(s).strip().upper().replace("&", "AND")
-
 # -----------------------------
 # UI - Header
 # -----------------------------
-st.title("YM Attendance Dashboard (Upload → Filter → View)")
+st.title("Session Visits Dashboard")
 
 uploaded = st.file_uploader("Upload Excel/CSV", type=["xlsx", "xls", "csv"])
 if not uploaded:
@@ -193,7 +188,7 @@ else:
     col_progsub = "ProgramSubType"
     df[col_progsub] = np.nan
 
-# Create bucket column
+# Create bucket column (uses original SessionAttended for visit buckets)
 if "SessionAttended" in df.columns:
     df["SessionAttendedBucket"] = df.apply(
         lambda r: bucket_sessions_by_program_subtype(r.get(col_progsub), r.get("SessionAttended")),
@@ -231,7 +226,7 @@ selected_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
 if selected_progsub != "All":
     f = f[f[col_progsub] == selected_progsub]
 
-# NEW FILTER: Gender
+# Gender filter
 if col_gender:
     genders = sorted([x for x in f[col_gender].dropna().unique()])
     selected_gender = st.sidebar.selectbox("Gender", ["All"] + genders)
@@ -259,7 +254,7 @@ if bad_gt > 0 or bad_tot > 0:
 # -----------------------------
 # KPIs (use SAFE sums)
 # -----------------------------
-k1, k2, k3, k4, k5 = st.columns(5)
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 
 records = len(f)
 unique_children = f[col_child].nunique() if col_child else np.nan
@@ -269,11 +264,22 @@ total_safe_sum = f["Total_safe"].sum(skipna=True) if "Total_safe" in f.columns e
 
 overall_pct = (attended_safe_sum / total_safe_sum * 100) if (isinstance(total_safe_sum, (int, float, np.number)) and total_safe_sum and total_safe_sum > 0) else np.nan
 
+# Extra KPIs derived from existing data
+zero_visit = int((f["SessionAttended"] == 0).sum()) if "SessionAttended" in f.columns else 0
+zero_visit_pct = (zero_visit / records * 100) if records > 0 else np.nan
+
+avg_visits = f["SessionAttended"].mean() if "SessionAttended" in f.columns and records > 0 else np.nan
+
+hf10 = int((f["SessionAttended"] >= 10).sum()) if "SessionAttended" in f.columns else 0
+hf10_pct = (hf10 / records * 100) if records > 0 else np.nan
+
 k1.metric("Records", f"{records:,}")
 k2.metric("Unique Children", f"{int(unique_children):,}" if not np.isnan(unique_children) else "NA")
 k3.metric("Sessions Attended (Safe)", f"{attended_safe_sum:,.0f}" if not np.isnan(attended_safe_sum) else "NA")
 k4.metric("Total Sessions (Safe)", f"{total_safe_sum:,.0f}" if not np.isnan(total_safe_sum) else "NA")
 k5.metric("Attendance % (Safe)", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
+k6.metric("Zero-Visit Records", f"{zero_visit:,}" + (f" ({zero_visit_pct:.1f}%)" if not np.isnan(zero_visit_pct) else ""))
+k7.metric("Avg Visits / Record", f"{avg_visits:.2f}" if not np.isnan(avg_visits) else "NA")
 
 st.divider()
 
@@ -299,6 +305,32 @@ if "SessionAttended" in f.columns:
     st.dataframe(bdf, use_container_width=True)
 else:
     st.info("SessionAttended column not available; cannot compute buckets.")
+
+st.divider()
+
+# -----------------------------
+# ProgramSubType Effectiveness (extra from same data)
+# -----------------------------
+st.subheader("ProgramSubType Effectiveness (derived)")
+
+if col_progsub and "SessionAttended" in f.columns:
+    prog = (
+        f.groupby(col_progsub)
+        .agg(
+            Records=("SessionAttended", "size"),
+            AvgVisits=("SessionAttended", "mean"),
+            ZeroVisitPct=("SessionAttended", lambda x: (x.eq(0).mean() * 100) if len(x) else np.nan),
+            HighFreq10Pct=("SessionAttended", lambda x: (x.ge(10).mean() * 100) if len(x) else np.nan),
+        )
+        .reset_index()
+    )
+    prog["AvgVisits"] = prog["AvgVisits"].round(2)
+    prog["ZeroVisitPct"] = prog["ZeroVisitPct"].round(1)
+    prog["HighFreq10Pct"] = prog["HighFreq10Pct"].round(1)
+
+    st.dataframe(prog.sort_values("AvgVisits", ascending=False), use_container_width=True)
+else:
+    st.info("ProgramSubType or SessionAttended not available.")
 
 st.divider()
 
@@ -333,7 +365,7 @@ else:
 st.divider()
 
 # -----------------------------
-# State-wise Attendance % (Bottom) - Bubble chart fallback (name-only)
+# State-wise Attendance % (Bottom) - Bubble chart (name-only)
 # -----------------------------
 st.subheader("State-wise Attendance % (Bottom View)")
 
@@ -344,9 +376,9 @@ if col_state and "SessionAttended_safe" in f.columns and "Total_safe" in f.colum
     state_agg[col_state] = state_agg[col_state].astype(str)
 
     bubble = alt.Chart(state_agg).mark_circle().encode(
-        x=alt.X("AttendancePct:Q", title="Attendance %"),
+        x=alt.X("AttendancePct:Q", title="Attendance % (Safe)"),
         y=alt.Y(f"{col_state}:N", title="State", sort="-x"),
-        size=alt.Size("Total:Q", title="Total Sessions"),
+        size=alt.Size("Total:Q", title="Total Sessions (Safe)"),
         tooltip=[
             alt.Tooltip(f"{col_state}:N", title="State"),
             alt.Tooltip("SessionAttended:Q", title="Sessions Attended (Safe)", format=",.0f"),
@@ -357,6 +389,19 @@ if col_state and "SessionAttended_safe" in f.columns and "Total_safe" in f.colum
     st.altair_chart(bubble, use_container_width=True)
 else:
     st.info("State or required columns not available to create the view.")
+
+st.divider()
+
+# -----------------------------
+# Download filtered data (extra quick win)
+# -----------------------------
+st.subheader("Export")
+st.download_button(
+    "Download filtered data (CSV)",
+    data=f.to_csv(index=False).encode("utf-8"),
+    file_name="session_visits_filtered.csv",
+    mime="text/csv",
+)
 
 # -----------------------------
 # Raw data
