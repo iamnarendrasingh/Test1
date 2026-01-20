@@ -12,6 +12,7 @@ def read_uploaded_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedF
     if name.endswith(".csv"):
         return pd.read_csv(uploaded_file)
     if name.endswith(".xlsx") or name.endswith(".xls"):
+        # openpyxl must be installed for .xlsx
         return pd.read_excel(uploaded_file)
     raise ValueError("Unsupported file type. Upload CSV or Excel (.xlsx/.xls).")
 
@@ -49,7 +50,7 @@ except Exception as e:
 
 df.columns = [c.strip() for c in df.columns]
 
-# Identify core columns based on your dummy data
+# Identify core columns (based on your dummy data)
 col_region = pick_col(df, ["RegionName", "Region", "region"])
 col_state  = pick_col(df, ["StateName", "State", "state"])
 col_proj   = pick_col(df, ["ProjectID", "ProjectId", "Project", "project"])
@@ -69,6 +70,11 @@ df = safe_numeric(df, [
 # Attendance rate
 if "SessionAttended" in df.columns and "Total" in df.columns:
     df["AttendancePct"] = np.where(df["Total"] > 0, (df["SessionAttended"] / df["Total"]) * 100, np.nan)
+
+# Hardening: ensure AttendancePct is numeric and within 0-100
+if "AttendancePct" in df.columns:
+    df["AttendancePct"] = pd.to_numeric(df["AttendancePct"], errors="coerce")
+    df.loc[(df["AttendancePct"] < 0) | (df["AttendancePct"] > 100), "AttendancePct"] = np.nan
 
 # -----------------------------
 # Sidebar Filters
@@ -127,12 +133,14 @@ with c1:
     if col_month and "SessionAttended" in f.columns and "Total" in f.columns:
         tmp = f.groupby(col_month, dropna=False)[["SessionAttended", "Total"]].sum().reset_index()
         tmp["AttendancePct"] = np.where(tmp["Total"] > 0, (tmp["SessionAttended"] / tmp["Total"]) * 100, np.nan)
+
         # Try to sort if month looks like YYYY-MM
         try:
             tmp["_dt"] = pd.to_datetime(tmp[col_month].astype(str), errors="coerce")
             tmp = tmp.sort_values("_dt")
         except Exception:
             pass
+
         st.line_chart(tmp.set_index(col_month)["AttendancePct"])
         st.caption("Shows % attendance (SessionAttended / Total) by month-like field.")
     else:
@@ -142,8 +150,17 @@ with c2:
     st.subheader("Attendance Distribution (Record Level)")
     if "AttendancePct" in f.columns:
         hist_data = f["AttendancePct"].dropna()
+
         if len(hist_data) > 0:
-            st.bar_chart(pd.cut(hist_data, bins=[0, 20, 40, 60, 80, 100], include_lowest=True).value_counts().sort_index())
+            # Robust binning -> convert to clean DataFrame for st.bar_chart (avoids Altair schema errors)
+            bins = [0, 20, 40, 60, 80, 100]
+            labels = ["0–20", "20–40", "40–60", "60–80", "80–100"]
+
+            binned = pd.cut(hist_data, bins=bins, labels=labels, include_lowest=True)
+            counts = binned.value_counts().reindex(labels, fill_value=0)
+
+            hist_df = pd.DataFrame({"Attendance Band": labels, "Count": counts.values})
+            st.bar_chart(hist_df.set_index("Attendance Band"))
         else:
             st.info("No non-null attendance % values after filtering.")
     else:
@@ -171,6 +188,7 @@ with c4:
             mix["InPersonSessions"] = float(f["InPersonSessions"].sum())
         if "VirtualSessions" in f.columns:
             mix["VirtualSessions"] = float(f["VirtualSessions"].sum())
+
         mix_df = pd.DataFrame({"Type": list(mix.keys()), "Count": list(mix.values())}).set_index("Type")
         st.bar_chart(mix_df["Count"])
     else:
