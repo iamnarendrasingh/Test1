@@ -56,43 +56,6 @@ def bar_with_labels(
 
     return bar + text
 
-def line_with_point_labels(
-    data: pd.DataFrame,
-    x_col: str,
-    y_col: str,
-    x_title: str,
-    y_title: str,
-    value_format: str = ".1f",
-):
-    """Altair line chart with points + labels + tooltips."""
-    base = alt.Chart(data)
-
-    line = base.mark_line().encode(
-        x=alt.X(f"{x_col}:N", title=x_title, sort=None, axis=alt.Axis(labelAngle=-45)),
-        y=alt.Y(f"{y_col}:Q", title=y_title),
-        tooltip=[
-            alt.Tooltip(f"{x_col}:N", title=x_title),
-            alt.Tooltip(f"{y_col}:Q", title=y_title, format=value_format),
-        ],
-    )
-
-    points = base.mark_point(size=70).encode(
-        x=alt.X(f"{x_col}:N", sort=None),
-        y=alt.Y(f"{y_col}:Q"),
-        tooltip=[
-            alt.Tooltip(f"{x_col}:N", title=x_title),
-            alt.Tooltip(f"{y_col}:Q", title=y_title, format=value_format),
-        ],
-    )
-
-    labels = base.mark_text(dy=-10, fontSize=11).encode(
-        x=alt.X(f"{x_col}:N", sort=None),
-        y=alt.Y(f"{y_col}:Q"),
-        text=alt.Text(f"{y_col}:Q", format=value_format),
-    )
-
-    return line + points + labels
-
 # --- Bucketing logic depends on ProgramSubType ---
 def bucket_sessions_by_program_subtype(program_subtype: str, session_attended: float) -> str:
     """
@@ -101,16 +64,12 @@ def bucket_sessions_by_program_subtype(program_subtype: str, session_attended: f
       2) COMMUNITY LEARNING -> 0, 1-5, 6-10, 11-20, 21-30, 31+
       Else -> default buckets: 0, 1-3, 4-5, 6-10, 11-15, 16-20, 21-30, 31+
     """
-    # normalize
     ps = "" if program_subtype is None else str(program_subtype).strip().lower()
     s = pd.to_numeric(session_attended, errors="coerce")
-    if pd.isna(s):
-        s = 0.0
-    if s < 0:
+    if pd.isna(s) or s < 0:
         s = 0.0
     s = float(s)
 
-    # Rule 1: life skill (bucket size 5)
     if ps == "life skill" or "life skill" in ps:
         if s >= 30:
             return "30+"
@@ -118,7 +77,6 @@ def bucket_sessions_by_program_subtype(program_subtype: str, session_attended: f
         hi = lo + 4
         return f"{lo}-{hi}"
 
-    # Rule 2: community learning (explicit buckets)
     if ps == "community learning" or "community" in ps:
         if s == 0:
             return "0"
@@ -132,7 +90,6 @@ def bucket_sessions_by_program_subtype(program_subtype: str, session_attended: f
             return "21-30"
         return "31+"
 
-    # Default (fallback)
     if s == 0:
         return "0"
     if 1 <= s <= 3:
@@ -181,13 +138,12 @@ except Exception as e:
 
 df.columns = [c.strip() for c in df.columns]
 
-# Identify columns (based on your dummy data)
+# Identify columns
 col_region = pick_col(df, ["RegionName", "Region", "region"])
 col_state = pick_col(df, ["StateName", "State", "state"])
 col_proj = pick_col(df, ["ProjectID", "ProjectId", "Project", "project"])
 col_child = pick_col(df, ["ChildId", "ChildID", "child_id", "childid"])
 col_gender = pick_col(df, ["Gender", "gender"])
-col_month = pick_col(df, ["DoJ_YM_Str", "YM", "Month", "month", "YearMonth"])
 col_progsub = pick_col(df, ["ProgramSubType", "ProgramSubTypeName", "Program Sub Type", "programsubtype"])
 
 # Convert numerics
@@ -203,20 +159,18 @@ df = safe_numeric(df, [
 if "SessionAttended" in df.columns and "Total" in df.columns:
     df["AttendancePct"] = np.where(df["Total"] > 0, (df["SessionAttended"] / df["Total"]) * 100, np.nan)
 
-# Hardening: ensure AttendancePct in range
 if "AttendancePct" in df.columns:
     df["AttendancePct"] = pd.to_numeric(df["AttendancePct"], errors="coerce")
     df.loc[(df["AttendancePct"] < 0) | (df["AttendancePct"] > 100), "AttendancePct"] = np.nan
 
-# Prepare ProgramSubType field (for bucketing + filtering)
+# Ensure ProgramSubType exists
 if col_progsub:
     df[col_progsub] = df[col_progsub].astype(str).replace({"nan": np.nan, "None": np.nan})
 else:
-    # If column missing, create a placeholder to keep logic consistent
     col_progsub = "ProgramSubType"
     df[col_progsub] = np.nan
 
-# Create bucket column (depends on ProgramSubType)
+# Create bucket column
 if "SessionAttended" in df.columns:
     df["SessionAttendedBucket"] = df.apply(
         lambda r: bucket_sessions_by_program_subtype(r.get(col_progsub), r.get("SessionAttended")),
@@ -249,7 +203,6 @@ if col_proj:
     if selected_proj != "All":
         f = f[f[col_proj] == selected_proj]
 
-# ProgramSubType filter
 progsubs = sorted([x for x in f[col_progsub].dropna().unique()])
 selected_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
 if selected_progsub != "All":
@@ -258,7 +211,6 @@ if selected_progsub != "All":
 st.sidebar.divider()
 show_raw = st.sidebar.checkbox("Show raw data table", value=False)
 
-# Dynamic bucket order based on selected ProgramSubType
 bucket_order = ordered_buckets_for_program_subtype(selected_progsub if selected_progsub != "All" else "")
 
 # -----------------------------
@@ -278,149 +230,66 @@ k3.metric("Sessions Attended", f"{attended_sum:,.0f}" if not np.isnan(attended_s
 k4.metric("Total Sessions", f"{total_sum:,.0f}" if not np.isnan(total_sum) else "NA")
 k5.metric("Attendance %", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
 
-# Additional KPI row: show bucket counts as KPI cards (dynamic order)
-st.subheader("Session Attended Buckets (Counts)")
-bucket_cols = st.columns(len(bucket_order))
+st.divider()
+
+# -----------------------------
+# Attendance by Gender (with labels + numbers)
+# -----------------------------
+st.subheader("Attendance by Gender (with labels + numbers)")
+if col_gender and "SessionAttended" in f.columns and "Total" in f.columns:
+    g = f.groupby(col_gender)[["SessionAttended", "Total"]].sum().reset_index()
+    g["AttendancePct"] = np.where(g["Total"] > 0, (g["SessionAttended"] / g["Total"]) * 100, np.nan)
+    g[col_gender] = g[col_gender].astype(str)
+
+    base = alt.Chart(g)
+    bar = base.mark_bar().encode(
+        x=alt.X(f"{col_gender}:N", title="Gender", sort=None),
+        y=alt.Y("AttendancePct:Q", title="Attendance %"),
+        tooltip=[
+            alt.Tooltip(f"{col_gender}:N", title="Gender"),
+            alt.Tooltip("SessionAttended:Q", title="Sessions Attended", format=",.0f"),
+            alt.Tooltip("Total:Q", title="Total Sessions", format=",.0f"),
+            alt.Tooltip("AttendancePct:Q", title="Attendance %", format=".1f"),
+        ],
+    )
+    text = base.mark_text(dy=-6, fontSize=12).encode(
+        x=alt.X(f"{col_gender}:N", sort=None),
+        y=alt.Y("AttendancePct:Q"),
+        text=alt.Text("AttendancePct:Q", format=".1f"),
+    )
+    st.altair_chart(bar + text, use_container_width=True)
+
+    g_tbl = g[[col_gender, "SessionAttended", "Total", "AttendancePct"]].copy()
+    g_tbl["AttendancePct"] = g_tbl["AttendancePct"].round(1)
+    st.dataframe(g_tbl, use_container_width=True)
+else:
+    st.info("Gender or required columns not available.")
+
+st.divider()
+
+# -----------------------------
+# Session Attended Buckets (Counts) -> TABLE FORMAT (requested)
+# -----------------------------
+st.subheader("Session Attended Buckets (Counts) - Table")
 
 if "SessionAttended" in f.columns:
-    bucket_counts = (
+    bdf = (
         f["SessionAttendedBucket"]
         .value_counts()
         .reindex(bucket_order, fill_value=0)
-        .astype(int)
+        .reset_index()
     )
-    for i, b in enumerate(bucket_order):
-        bucket_cols[i].metric(b, f"{bucket_counts[b]:,}")
+    bdf.columns = ["Bucket", "Count"]
+    bdf["Bucket"] = bdf["Bucket"].astype(str)
+    bdf["Count"] = bdf["Count"].astype(int)
+
+    # Also show percentage
+    total_records = int(bdf["Count"].sum())
+    bdf["Percent"] = np.where(total_records > 0, (bdf["Count"] / total_records) * 100, 0.0).round(1)
+
+    st.dataframe(bdf, use_container_width=True)
 else:
     st.info("SessionAttended column not available; cannot compute buckets.")
-
-st.divider()
-
-# -----------------------------
-# Charts Row 1
-# -----------------------------
-c1, c2 = st.columns(2)
-
-with c1:
-    st.subheader("Attendance by Month (with labels)")
-    if col_month and "SessionAttended" in f.columns and "Total" in f.columns:
-        tmp = f.groupby(col_month, dropna=False)[["SessionAttended", "Total"]].sum().reset_index()
-        tmp["AttendancePct"] = np.where(tmp["Total"] > 0, (tmp["SessionAttended"] / tmp["Total"]) * 100, np.nan)
-
-        try:
-            tmp["_dt"] = pd.to_datetime(tmp[col_month].astype(str), errors="coerce")
-            tmp = tmp.sort_values("_dt")
-        except Exception:
-            pass
-
-        tmp[col_month] = tmp[col_month].astype(str)
-
-        chart = line_with_point_labels(
-            tmp,
-            x_col=col_month,
-            y_col="AttendancePct",
-            x_title="Month",
-            y_title="Attendance %",
-            value_format=".1f",
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        st.warning("Month column or required numeric columns not found. Expected: DoJ_YM_Str (or similar), SessionAttended, Total.")
-
-with c2:
-    st.subheader("SessionAttended Buckets (with labels)")
-    if "SessionAttended" in f.columns:
-        bdf = (
-            f["SessionAttendedBucket"]
-            .value_counts()
-            .reindex(bucket_order, fill_value=0)
-            .reset_index()
-        )
-        bdf.columns = ["Bucket", "Count"]
-        bdf["Bucket"] = bdf["Bucket"].astype(str)
-
-        chart = bar_with_labels(
-            bdf,
-            x_col="Bucket",
-            y_col="Count",
-            x_title="SessionAttended Bucket",
-            y_title="Record Count",
-            value_format=".0f",
-        )
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        st.info("SessionAttended not available.")
-
-st.divider()
-
-# -----------------------------
-# Charts Row 2
-# -----------------------------
-c3, c4 = st.columns(2)
-
-with c3:
-    st.subheader("Attendance by Gender (with labels + numbers)")
-    # You asked: "Here I want numbers" -> show counts + attendance %
-    if col_gender and "SessionAttended" in f.columns and "Total" in f.columns:
-        g = f.groupby(col_gender)[["SessionAttended", "Total"]].sum().reset_index()
-        g["AttendancePct"] = np.where(g["Total"] > 0, (g["SessionAttended"] / g["Total"]) * 100, np.nan)
-
-        # Display counts as well (table + chart labels)
-        st.caption("Bars show Attendance %. Labels show Attendance % (and tooltip includes attended/total).")
-        g[col_gender] = g[col_gender].astype(str)
-
-        base = alt.Chart(g)
-
-        bar = base.mark_bar().encode(
-            x=alt.X(f"{col_gender}:N", title="Gender", sort=None),
-            y=alt.Y("AttendancePct:Q", title="Attendance %"),
-            tooltip=[
-                alt.Tooltip(f"{col_gender}:N", title="Gender"),
-                alt.Tooltip("SessionAttended:Q", title="Sessions Attended", format=",.0f"),
-                alt.Tooltip("Total:Q", title="Total Sessions", format=",.0f"),
-                alt.Tooltip("AttendancePct:Q", title="Attendance %", format=".1f"),
-            ],
-        )
-
-        text = base.mark_text(dy=-6, fontSize=12).encode(
-            x=alt.X(f"{col_gender}:N", sort=None),
-            y=alt.Y("AttendancePct:Q"),
-            text=alt.Text("AttendancePct:Q", format=".1f"),
-        )
-
-        st.altair_chart(bar + text, use_container_width=True)
-
-        # Optional: show a small summary table under chart
-        g_tbl = g[[col_gender, "SessionAttended", "Total", "AttendancePct"]].copy()
-        g_tbl["AttendancePct"] = g_tbl["AttendancePct"].round(1)
-        st.dataframe(g_tbl, use_container_width=True)
-    else:
-        st.info("Gender or required columns not available.")
-
-with c4:
-    st.subheader("Session Mix (In-Person vs Virtual) with labels")
-    if "InPersonSessions" in f.columns or "VirtualSessions" in f.columns:
-        mix = []
-        if "InPersonSessions" in f.columns:
-            mix.append({"Type": "InPersonSessions", "Count": float(f["InPersonSessions"].sum())})
-        if "VirtualSessions" in f.columns:
-            mix.append({"Type": "VirtualSessions", "Count": float(f["VirtualSessions"].sum())})
-
-        mix_df = pd.DataFrame(mix)
-        if len(mix_df) > 0:
-            chart = bar_with_labels(
-                mix_df,
-                x_col="Type",
-                y_col="Count",
-                x_title="Type",
-                y_title="Sessions",
-                value_format=".0f",
-            )
-            st.altair_chart(chart, use_container_width=True)
-        else:
-            st.info("No session mix values found after filtering.")
-    else:
-        st.info("InPersonSessions / VirtualSessions columns not available.")
 
 st.divider()
 
@@ -449,6 +318,55 @@ if col_proj and "SessionAttended" in f.columns and "Total" in f.columns:
     st.altair_chart(proj_chart, use_container_width=True)
 else:
     st.info("Project or required numeric columns not available.")
+
+st.divider()
+
+# -----------------------------
+# MAP by State (Bottom) - Requested
+# -----------------------------
+st.subheader("State-wise Attendance % (Map)")
+
+# For an actual geographic map, we need state coordinates/geojson.
+# This implementation uses Streamlit's built-in map which needs lat/lon.
+# If your dataset does not have lat/lon, we provide a fallback bubble chart by State.
+
+if col_state and "SessionAttended" in f.columns and "Total" in f.columns:
+    state_agg = f.groupby(col_state)[["SessionAttended", "Total"]].sum().reset_index()
+    state_agg["AttendancePct"] = np.where(state_agg["Total"] > 0, (state_agg["SessionAttended"] / state_agg["Total"]) * 100, np.nan)
+    state_agg[col_state] = state_agg[col_state].astype(str)
+
+    # If dataset has lat/lon, use st.map
+    col_lat = pick_col(f, ["lat", "latitude", "Latitude", "LAT"])
+    col_lon = pick_col(f, ["lon", "lng", "longitude", "Longitude", "LON"])
+
+    if col_lat and col_lon:
+        # Plot points directly (best when each row has lat/lon)
+        map_df = f[[col_lat, col_lon]].copy()
+        map_df.columns = ["lat", "lon"]
+        map_df = map_df.dropna()
+        if len(map_df) > 0:
+            st.caption("Map is based on latitude/longitude available in your file.")
+            st.map(map_df)
+        else:
+            st.info("Latitude/Longitude columns exist but no valid coordinates found after filtering.")
+    else:
+        st.info("No Latitude/Longitude columns found in file. Showing a State-wise bubble chart instead.")
+
+        bubble = alt.Chart(state_agg).mark_circle().encode(
+            x=alt.X("AttendancePct:Q", title="Attendance %"),
+            y=alt.Y(f"{col_state}:N", title="State", sort="-x"),
+            size=alt.Size("Total:Q", title="Total Sessions"),
+            tooltip=[
+                alt.Tooltip(f"{col_state}:N", title="State"),
+                alt.Tooltip("SessionAttended:Q", title="Sessions Attended", format=",.0f"),
+                alt.Tooltip("Total:Q", title="Total Sessions", format=",.0f"),
+                alt.Tooltip("AttendancePct:Q", title="Attendance %", format=".1f"),
+            ],
+        )
+
+        st.altair_chart(bubble, use_container_width=True)
+else:
+    st.info("State or required columns not available to create the map.")
 
 # -----------------------------
 # Raw data
