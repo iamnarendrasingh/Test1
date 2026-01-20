@@ -117,6 +117,11 @@ def ordered_buckets_for_program_subtype(program_subtype: str) -> list[str]:
 
     return ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
 
+def normalize_state(s: str) -> str:
+    if s is None:
+        return ""
+    return str(s).strip().upper().replace("&", "AND")
+
 # -----------------------------
 # UI - Header
 # -----------------------------
@@ -155,13 +160,31 @@ df = safe_numeric(df, [
     "NumeracySessions", "LiteracySessions"
 ])
 
-# Attendance rate
+# -----------------------------
+# Data quality checks & cleaning for attendance math
+# -----------------------------
 if "SessionAttended" in df.columns and "Total" in df.columns:
-    df["AttendancePct"] = np.where(df["Total"] > 0, (df["SessionAttended"] / df["Total"]) * 100, np.nan)
+    df["DQ_TotalNonPositive"] = df["Total"] <= 0
+    df["DQ_AttendedGTTotal"] = df["SessionAttended"] > df["Total"]
 
-if "AttendancePct" in df.columns:
-    df["AttendancePct"] = pd.to_numeric(df["AttendancePct"], errors="coerce")
-    df.loc[(df["AttendancePct"] < 0) | (df["AttendancePct"] > 100), "AttendancePct"] = np.nan
+    df["Total_safe"] = df["Total"].where(df["Total"] > 0, np.nan)
+    df["SessionAttended_safe"] = np.where(
+        df["Total_safe"].notna(),
+        np.minimum(df["SessionAttended"], df["Total"]),
+        np.nan
+    )
+
+    df["AttendancePct_safe"] = np.where(
+        df["Total_safe"] > 0,
+        (df["SessionAttended_safe"] / df["Total_safe"]) * 100,
+        np.nan
+    )
+else:
+    df["DQ_TotalNonPositive"] = False
+    df["DQ_AttendedGTTotal"] = False
+    df["Total_safe"] = np.nan
+    df["SessionAttended_safe"] = np.nan
+    df["AttendancePct_safe"] = np.nan
 
 # Ensure ProgramSubType exists
 if col_progsub:
@@ -208,67 +231,54 @@ selected_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
 if selected_progsub != "All":
     f = f[f[col_progsub] == selected_progsub]
 
+# NEW FILTER: Gender
+if col_gender:
+    genders = sorted([x for x in f[col_gender].dropna().unique()])
+    selected_gender = st.sidebar.selectbox("Gender", ["All"] + genders)
+    if selected_gender != "All":
+        f = f[f[col_gender] == selected_gender]
+
 st.sidebar.divider()
 show_raw = st.sidebar.checkbox("Show raw data table", value=False)
 
 bucket_order = ordered_buckets_for_program_subtype(selected_progsub if selected_progsub != "All" else "")
 
 # -----------------------------
-# KPIs
+# Data Quality Summary (Filtered)
+# -----------------------------
+bad_gt = int(f["DQ_AttendedGTTotal"].sum()) if "DQ_AttendedGTTotal" in f.columns else 0
+bad_tot = int(f["DQ_TotalNonPositive"].sum()) if "DQ_TotalNonPositive" in f.columns else 0
+if bad_gt > 0 or bad_tot > 0:
+    st.warning(
+        f"Data quality detected in filtered data: "
+        f"{bad_gt:,} rows have SessionAttended > Total; "
+        f"{bad_tot:,} rows have Total <= 0. "
+        "Attendance % is computed using cleaned values (attended clipped to total; non-positive totals excluded)."
+    )
+
+# -----------------------------
+# KPIs (use SAFE sums)
 # -----------------------------
 k1, k2, k3, k4, k5 = st.columns(5)
 
 records = len(f)
 unique_children = f[col_child].nunique() if col_child else np.nan
-attended_sum = f["SessionAttended"].sum() if "SessionAttended" in f.columns else np.nan
-total_sum = f["Total"].sum() if "Total" in f.columns else np.nan
-overall_pct = (attended_sum / total_sum * 100) if (isinstance(total_sum, (int, float, np.number)) and total_sum and total_sum > 0) else np.nan
+
+attended_safe_sum = f["SessionAttended_safe"].sum(skipna=True) if "SessionAttended_safe" in f.columns else np.nan
+total_safe_sum = f["Total_safe"].sum(skipna=True) if "Total_safe" in f.columns else np.nan
+
+overall_pct = (attended_safe_sum / total_safe_sum * 100) if (isinstance(total_safe_sum, (int, float, np.number)) and total_safe_sum and total_safe_sum > 0) else np.nan
 
 k1.metric("Records", f"{records:,}")
 k2.metric("Unique Children", f"{int(unique_children):,}" if not np.isnan(unique_children) else "NA")
-k3.metric("Sessions Attended", f"{attended_sum:,.0f}" if not np.isnan(attended_sum) else "NA")
-k4.metric("Total Sessions", f"{total_sum:,.0f}" if not np.isnan(total_sum) else "NA")
-k5.metric("Attendance %", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
+k3.metric("Sessions Attended (Safe)", f"{attended_safe_sum:,.0f}" if not np.isnan(attended_safe_sum) else "NA")
+k4.metric("Total Sessions (Safe)", f"{total_safe_sum:,.0f}" if not np.isnan(total_safe_sum) else "NA")
+k5.metric("Attendance % (Safe)", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
 
 st.divider()
 
 # -----------------------------
-# Attendance by Gender (with labels + numbers)
-# -----------------------------
-st.subheader("Attendance by Gender (with labels + numbers)")
-if col_gender and "SessionAttended" in f.columns and "Total" in f.columns:
-    g = f.groupby(col_gender)[["SessionAttended", "Total"]].sum().reset_index()
-    g["AttendancePct"] = np.where(g["Total"] > 0, (g["SessionAttended"] / g["Total"]) * 100, np.nan)
-    g[col_gender] = g[col_gender].astype(str)
-
-    base = alt.Chart(g)
-    bar = base.mark_bar().encode(
-        x=alt.X(f"{col_gender}:N", title="Gender", sort=None),
-        y=alt.Y("AttendancePct:Q", title="Attendance %"),
-        tooltip=[
-            alt.Tooltip(f"{col_gender}:N", title="Gender"),
-            alt.Tooltip("SessionAttended:Q", title="Sessions Attended", format=",.0f"),
-            alt.Tooltip("Total:Q", title="Total Sessions", format=",.0f"),
-            alt.Tooltip("AttendancePct:Q", title="Attendance %", format=".1f"),
-        ],
-    )
-    text = base.mark_text(dy=-6, fontSize=12).encode(
-        x=alt.X(f"{col_gender}:N", sort=None),
-        y=alt.Y("AttendancePct:Q"),
-        text=alt.Text("AttendancePct:Q", format=".1f"),
-    )
-    st.altair_chart(bar + text, use_container_width=True)
-
-    g_tbl = g[[col_gender, "SessionAttended", "Total", "AttendancePct"]].copy()
-    g_tbl["AttendancePct"] = g_tbl["AttendancePct"].round(1)
-    st.dataframe(g_tbl, use_container_width=True)
-else:
-    st.info("Gender or required columns not available.")
-
-st.divider()
-
-# -----------------------------
-# Session Attended Buckets (Counts) -> TABLE FORMAT (requested)
+# Session Attended Buckets (Counts) - TABLE FORMAT
 # -----------------------------
 st.subheader("Session Attended Buckets (Counts) - Table")
 
@@ -283,7 +293,6 @@ if "SessionAttended" in f.columns:
     bdf["Bucket"] = bdf["Bucket"].astype(str)
     bdf["Count"] = bdf["Count"].astype(int)
 
-    # Also show percentage
     total_records = int(bdf["Count"].sum())
     bdf["Percent"] = np.where(total_records > 0, (bdf["Count"] / total_records) * 100, 0.0).round(1)
 
@@ -294,11 +303,13 @@ else:
 st.divider()
 
 # -----------------------------
-# Top Projects table + labeled chart
+# Top Projects by Attendance % (table + labeled chart) - uses SAFE values
 # -----------------------------
 st.subheader("Top Projects by Attendance % (table + labeled chart)")
-if col_proj and "SessionAttended" in f.columns and "Total" in f.columns:
-    p = f.groupby(col_proj)[["SessionAttended", "Total"]].sum().reset_index()
+
+if col_proj and "SessionAttended_safe" in f.columns and "Total_safe" in f.columns:
+    p = f.groupby(col_proj)[["SessionAttended_safe", "Total_safe"]].sum().reset_index()
+    p = p.rename(columns={"SessionAttended_safe": "SessionAttended", "Total_safe": "Total"})
     p["AttendancePct"] = np.where(p["Total"] > 0, (p["SessionAttended"] / p["Total"]) * 100, np.nan)
     p = p.sort_values("AttendancePct", ascending=False)
 
@@ -322,51 +333,30 @@ else:
 st.divider()
 
 # -----------------------------
-# MAP by State (Bottom) - Requested
+# State-wise Attendance % (Bottom) - Bubble chart fallback (name-only)
 # -----------------------------
-st.subheader("State-wise Attendance % (Map)")
+st.subheader("State-wise Attendance % (Bottom View)")
 
-# For an actual geographic map, we need state coordinates/geojson.
-# This implementation uses Streamlit's built-in map which needs lat/lon.
-# If your dataset does not have lat/lon, we provide a fallback bubble chart by State.
-
-if col_state and "SessionAttended" in f.columns and "Total" in f.columns:
-    state_agg = f.groupby(col_state)[["SessionAttended", "Total"]].sum().reset_index()
+if col_state and "SessionAttended_safe" in f.columns and "Total_safe" in f.columns:
+    state_agg = f.groupby(col_state)[["SessionAttended_safe", "Total_safe"]].sum().reset_index()
+    state_agg = state_agg.rename(columns={"SessionAttended_safe": "SessionAttended", "Total_safe": "Total"})
     state_agg["AttendancePct"] = np.where(state_agg["Total"] > 0, (state_agg["SessionAttended"] / state_agg["Total"]) * 100, np.nan)
     state_agg[col_state] = state_agg[col_state].astype(str)
 
-    # If dataset has lat/lon, use st.map
-    col_lat = pick_col(f, ["lat", "latitude", "Latitude", "LAT"])
-    col_lon = pick_col(f, ["lon", "lng", "longitude", "Longitude", "LON"])
-
-    if col_lat and col_lon:
-        # Plot points directly (best when each row has lat/lon)
-        map_df = f[[col_lat, col_lon]].copy()
-        map_df.columns = ["lat", "lon"]
-        map_df = map_df.dropna()
-        if len(map_df) > 0:
-            st.caption("Map is based on latitude/longitude available in your file.")
-            st.map(map_df)
-        else:
-            st.info("Latitude/Longitude columns exist but no valid coordinates found after filtering.")
-    else:
-        st.info("No Latitude/Longitude columns found in file. Showing a State-wise bubble chart instead.")
-
-        bubble = alt.Chart(state_agg).mark_circle().encode(
-            x=alt.X("AttendancePct:Q", title="Attendance %"),
-            y=alt.Y(f"{col_state}:N", title="State", sort="-x"),
-            size=alt.Size("Total:Q", title="Total Sessions"),
-            tooltip=[
-                alt.Tooltip(f"{col_state}:N", title="State"),
-                alt.Tooltip("SessionAttended:Q", title="Sessions Attended", format=",.0f"),
-                alt.Tooltip("Total:Q", title="Total Sessions", format=",.0f"),
-                alt.Tooltip("AttendancePct:Q", title="Attendance %", format=".1f"),
-            ],
-        )
-
-        st.altair_chart(bubble, use_container_width=True)
+    bubble = alt.Chart(state_agg).mark_circle().encode(
+        x=alt.X("AttendancePct:Q", title="Attendance %"),
+        y=alt.Y(f"{col_state}:N", title="State", sort="-x"),
+        size=alt.Size("Total:Q", title="Total Sessions"),
+        tooltip=[
+            alt.Tooltip(f"{col_state}:N", title="State"),
+            alt.Tooltip("SessionAttended:Q", title="Sessions Attended (Safe)", format=",.0f"),
+            alt.Tooltip("Total:Q", title="Total Sessions (Safe)", format=",.0f"),
+            alt.Tooltip("AttendancePct:Q", title="Attendance % (Safe)", format=".1f"),
+        ],
+    )
+    st.altair_chart(bubble, use_container_width=True)
 else:
-    st.info("State or required columns not available to create the map.")
+    st.info("State or required columns not available to create the view.")
 
 # -----------------------------
 # Raw data
