@@ -56,13 +56,7 @@ def bucket_0_to_7_plus(series):
 BUCKET_0_7_ORDER = ["0", "1", "2", "3", "4", "5", "6", "7+"]
 
 def add_export_footer_rows(df_out: pd.DataFrame, notes: list[str]) -> pd.DataFrame:
-    """
-    Add blank line + footer rows at bottom so that when exporting to Excel/CSV,
-    the export timestamp and filter selections are clearly visible.
-    """
-    # Create a single-column footer dataframe and then align columns
     footer = pd.DataFrame({df_out.columns[0]: [""] + notes})
-    # Add remaining columns as blanks
     for c in df_out.columns[1:]:
         footer[c] = ""
     return pd.concat([df_out, footer], ignore_index=True)
@@ -117,13 +111,45 @@ c1.metric("Total Submissions (Rows)", f"{total_rows:,}")
 c2.metric("Total Children (Unique)", f"{int(total_children):,}" if not np.isnan(total_children) else "NA")
 c3.metric("Unique States", df[col_state].nunique() if col_state else "NA")
 
+# ---- StateName-wise summary table + PIE CHART ----
 if col_state:
     st.markdown("### StateName-wise Submissions (Rows)")
-    st.dataframe(
-        df[col_state].value_counts(dropna=False).reset_index(name="Rows").rename(columns={"index": "StateName"}),
-        use_container_width=True
-    )
 
+    state_counts = (
+        df[col_state]
+        .fillna("Unknown")
+        .astype(str)
+        .value_counts()
+        .reset_index()
+    )
+    state_counts.columns = ["StateName", "Rows"]
+
+    st.dataframe(state_counts, use_container_width=True)
+
+    # Pie charts get unreadable with too many slices.
+    # So we show Top 10 + "Others"
+    top_n = 10
+    if len(state_counts) > top_n:
+        top = state_counts.head(top_n).copy()
+        others_rows = int(state_counts["Rows"].iloc[top_n:].sum())
+        pie_df = pd.concat([top, pd.DataFrame([{"StateName": "Others", "Rows": others_rows}])], ignore_index=True)
+    else:
+        pie_df = state_counts.copy()
+
+    pie = alt.Chart(pie_df).mark_arc().encode(
+        theta=alt.Theta("Rows:Q"),
+        color=alt.Color("StateName:N", legend=alt.Legend(title="StateName")),
+        tooltip=[
+            alt.Tooltip("StateName:N", title="StateName"),
+            alt.Tooltip("Rows:Q", title="Rows", format=",.0f"),
+        ],
+    ).properties(height=350)
+
+    st.altair_chart(pie, use_container_width=True)
+else:
+    st.info("Column `StateName` not found; state-wise submission summary is not available.")
+
+# Gender summary
 if col_gender:
     st.markdown("### Gender-wise Submissions (Rows)")
     st.dataframe(
@@ -146,7 +172,6 @@ for mc in metric_cols:
 st.sidebar.header("Filters")
 f = df.copy()
 
-# keep filter selections for export footer
 sel_state = "All"
 sel_progsub = "All"
 sel_gender = "All"
@@ -218,12 +243,11 @@ for mc in metric_cols:
     st.divider()
 
 # -----------------------------
-# Export (with export date + filter selections in footer)
+# Export (with footer rows)
 # -----------------------------
 st.subheader("Export")
 
 export_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 footer_notes = [
     f"Export Timestamp: {export_ts}",
     f"Filters Applied - StateName: {sel_state}",
@@ -231,7 +255,6 @@ footer_notes = [
     f"Filters Applied - Gender: {sel_gender}",
 ]
 
-# Prepare CSV with footer rows
 f_export = add_export_footer_rows(f.copy(), footer_notes)
 csv_bytes = f_export.to_csv(index=False).encode("utf-8")
 
