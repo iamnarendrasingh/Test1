@@ -93,15 +93,72 @@ def line_with_point_labels(
 
     return line + points + labels
 
-def session_attended_bucket(s: pd.Series) -> pd.Series:
+# --- Bucketing logic depends on ProgramSubType ---
+def bucket_sessions_by_program_subtype(program_subtype: str, session_attended: float) -> str:
     """
-    Buckets for SessionAttended:
-      0, 1-3, 4-5, 6-10, 11-15, 16-20, 21-30, 31+
+    Bucketing rules:
+      1) life skill -> buckets of size 5: 0-4, 5-9, 10-14, 15-19, 20-24, 25-29, 30+
+      2) COMMUNITY LEARNING -> 0, 1-5, 6-10, 11-20, 21-30, 31+
+      Else -> default buckets: 0, 1-3, 4-5, 6-10, 11-15, 16-20, 21-30, 31+
     """
-    s = pd.to_numeric(s, errors="coerce").fillna(0)
-    bins = [-0.1, 0, 3, 5, 10, 15, 20, 30, np.inf]
-    labels = ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
-    return pd.cut(s, bins=bins, labels=labels, include_lowest=True)
+    # normalize
+    ps = "" if program_subtype is None else str(program_subtype).strip().lower()
+    s = pd.to_numeric(session_attended, errors="coerce")
+    if pd.isna(s):
+        s = 0.0
+    if s < 0:
+        s = 0.0
+    s = float(s)
+
+    # Rule 1: life skill (bucket size 5)
+    if ps == "life skill" or "life skill" in ps:
+        if s >= 30:
+            return "30+"
+        lo = int(s // 5) * 5
+        hi = lo + 4
+        return f"{lo}-{hi}"
+
+    # Rule 2: community learning (explicit buckets)
+    if ps == "community learning" or "community" in ps:
+        if s == 0:
+            return "0"
+        if 1 <= s <= 5:
+            return "1-5"
+        if 6 <= s <= 10:
+            return "6-10"
+        if 11 <= s <= 20:
+            return "11-20"
+        if 21 <= s <= 30:
+            return "21-30"
+        return "31+"
+
+    # Default (fallback)
+    if s == 0:
+        return "0"
+    if 1 <= s <= 3:
+        return "1-3"
+    if 4 <= s <= 5:
+        return "4-5"
+    if 6 <= s <= 10:
+        return "6-10"
+    if 11 <= s <= 15:
+        return "11-15"
+    if 16 <= s <= 20:
+        return "16-20"
+    if 21 <= s <= 30:
+        return "21-30"
+    return "31+"
+
+def ordered_buckets_for_program_subtype(program_subtype: str) -> list[str]:
+    ps = "" if program_subtype is None else str(program_subtype).strip().lower()
+
+    if ps == "life skill" or "life skill" in ps:
+        return ["0-4", "5-9", "10-14", "15-19", "20-24", "25-29", "30+"]
+
+    if ps == "community learning" or "community" in ps:
+        return ["0", "1-5", "6-10", "11-20", "21-30", "31+"]
+
+    return ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
 
 # -----------------------------
 # UI - Header
@@ -126,11 +183,11 @@ df.columns = [c.strip() for c in df.columns]
 
 # Identify columns (based on your dummy data)
 col_region = pick_col(df, ["RegionName", "Region", "region"])
-col_state  = pick_col(df, ["StateName", "State", "state"])
-col_proj   = pick_col(df, ["ProjectID", "ProjectId", "Project", "project"])
-col_child  = pick_col(df, ["ChildId", "ChildID", "child_id", "childid"])
+col_state = pick_col(df, ["StateName", "State", "state"])
+col_proj = pick_col(df, ["ProjectID", "ProjectId", "Project", "project"])
+col_child = pick_col(df, ["ChildId", "ChildID", "child_id", "childid"])
 col_gender = pick_col(df, ["Gender", "gender"])
-col_month  = pick_col(df, ["DoJ_YM_Str", "YM", "Month", "month", "YearMonth"])
+col_month = pick_col(df, ["DoJ_YM_Str", "YM", "Month", "month", "YearMonth"])
 col_progsub = pick_col(df, ["ProgramSubType", "ProgramSubTypeName", "Program Sub Type", "programsubtype"])
 
 # Convert numerics
@@ -151,13 +208,22 @@ if "AttendancePct" in df.columns:
     df["AttendancePct"] = pd.to_numeric(df["AttendancePct"], errors="coerce")
     df.loc[(df["AttendancePct"] < 0) | (df["AttendancePct"] > 100), "AttendancePct"] = np.nan
 
-# Create SessionAttended bucket column (for KPI + chart)
+# Prepare ProgramSubType field (for bucketing + filtering)
+if col_progsub:
+    df[col_progsub] = df[col_progsub].astype(str).replace({"nan": np.nan, "None": np.nan})
+else:
+    # If column missing, create a placeholder to keep logic consistent
+    col_progsub = "ProgramSubType"
+    df[col_progsub] = np.nan
+
+# Create bucket column (depends on ProgramSubType)
 if "SessionAttended" in df.columns:
-    df["SessionAttendedBucket"] = session_attended_bucket(df["SessionAttended"]).astype(str)
+    df["SessionAttendedBucket"] = df.apply(
+        lambda r: bucket_sessions_by_program_subtype(r.get(col_progsub), r.get("SessionAttended")),
+        axis=1
+    )
 else:
     df["SessionAttendedBucket"] = "NA"
-
-bucket_order = ["0", "1-3", "4-5", "6-10", "11-15", "16-20", "21-30", "31+"]
 
 # -----------------------------
 # Sidebar Filters
@@ -183,17 +249,17 @@ if col_proj:
     if selected_proj != "All":
         f = f[f[col_proj] == selected_proj]
 
-# NEW FILTER: ProgramSubType
-if col_progsub:
-    progsubs = sorted([x for x in f[col_progsub].dropna().unique()])
-    selected_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
-    if selected_progsub != "All":
-        f = f[f[col_progsub] == selected_progsub]
-else:
-    selected_progsub = "NA"
+# ProgramSubType filter
+progsubs = sorted([x for x in f[col_progsub].dropna().unique()])
+selected_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
+if selected_progsub != "All":
+    f = f[f[col_progsub] == selected_progsub]
 
 st.sidebar.divider()
 show_raw = st.sidebar.checkbox("Show raw data table", value=False)
+
+# Dynamic bucket order based on selected ProgramSubType
+bucket_order = ordered_buckets_for_program_subtype(selected_progsub if selected_progsub != "All" else "")
 
 # -----------------------------
 # KPIs
@@ -212,7 +278,7 @@ k3.metric("Sessions Attended", f"{attended_sum:,.0f}" if not np.isnan(attended_s
 k4.metric("Total Sessions", f"{total_sum:,.0f}" if not np.isnan(total_sum) else "NA")
 k5.metric("Attendance %", f"{overall_pct:,.1f}%" if not np.isnan(overall_pct) else "NA")
 
-# Additional KPI row: show bucket counts as KPI cards
+# Additional KPI row: show bucket counts as KPI cards (dynamic order)
 st.subheader("Session Attended Buckets (Counts)")
 bucket_cols = st.columns(len(bucket_order))
 
@@ -237,12 +303,10 @@ c1, c2 = st.columns(2)
 
 with c1:
     st.subheader("Attendance by Month (with labels)")
-
     if col_month and "SessionAttended" in f.columns and "Total" in f.columns:
         tmp = f.groupby(col_month, dropna=False)[["SessionAttended", "Total"]].sum().reset_index()
         tmp["AttendancePct"] = np.where(tmp["Total"] > 0, (tmp["SessionAttended"] / tmp["Total"]) * 100, np.nan)
 
-        # Sort if month is like YYYY-MM
         try:
             tmp["_dt"] = pd.to_datetime(tmp[col_month].astype(str), errors="coerce")
             tmp = tmp.sort_values("_dt")
@@ -250,6 +314,7 @@ with c1:
             pass
 
         tmp[col_month] = tmp[col_month].astype(str)
+
         chart = line_with_point_labels(
             tmp,
             x_col=col_month,
@@ -264,7 +329,6 @@ with c1:
 
 with c2:
     st.subheader("SessionAttended Buckets (with labels)")
-
     if "SessionAttended" in f.columns:
         bdf = (
             f["SessionAttendedBucket"]
@@ -295,28 +359,46 @@ st.divider()
 c3, c4 = st.columns(2)
 
 with c3:
-    st.subheader("Attendance by Gender (with labels)")
-
+    st.subheader("Attendance by Gender (with labels + numbers)")
+    # You asked: "Here I want numbers" -> show counts + attendance %
     if col_gender and "SessionAttended" in f.columns and "Total" in f.columns:
         g = f.groupby(col_gender)[["SessionAttended", "Total"]].sum().reset_index()
         g["AttendancePct"] = np.where(g["Total"] > 0, (g["SessionAttended"] / g["Total"]) * 100, np.nan)
 
+        # Display counts as well (table + chart labels)
+        st.caption("Bars show Attendance %. Labels show Attendance % (and tooltip includes attended/total).")
         g[col_gender] = g[col_gender].astype(str)
-        chart = bar_with_labels(
-            g,
-            x_col=col_gender,
-            y_col="AttendancePct",
-            x_title="Gender",
-            y_title="Attendance %",
-            value_format=".1f",
+
+        base = alt.Chart(g)
+
+        bar = base.mark_bar().encode(
+            x=alt.X(f"{col_gender}:N", title="Gender", sort=None),
+            y=alt.Y("AttendancePct:Q", title="Attendance %"),
+            tooltip=[
+                alt.Tooltip(f"{col_gender}:N", title="Gender"),
+                alt.Tooltip("SessionAttended:Q", title="Sessions Attended", format=",.0f"),
+                alt.Tooltip("Total:Q", title="Total Sessions", format=",.0f"),
+                alt.Tooltip("AttendancePct:Q", title="Attendance %", format=".1f"),
+            ],
         )
-        st.altair_chart(chart, use_container_width=True)
+
+        text = base.mark_text(dy=-6, fontSize=12).encode(
+            x=alt.X(f"{col_gender}:N", sort=None),
+            y=alt.Y("AttendancePct:Q"),
+            text=alt.Text("AttendancePct:Q", format=".1f"),
+        )
+
+        st.altair_chart(bar + text, use_container_width=True)
+
+        # Optional: show a small summary table under chart
+        g_tbl = g[[col_gender, "SessionAttended", "Total", "AttendancePct"]].copy()
+        g_tbl["AttendancePct"] = g_tbl["AttendancePct"].round(1)
+        st.dataframe(g_tbl, use_container_width=True)
     else:
         st.info("Gender or required columns not available.")
 
 with c4:
     st.subheader("Session Mix (In-Person vs Virtual) with labels")
-
     if "InPersonSessions" in f.columns or "VirtualSessions" in f.columns:
         mix = []
         if "InPersonSessions" in f.columns:
@@ -346,7 +428,6 @@ st.divider()
 # Top Projects table + labeled chart
 # -----------------------------
 st.subheader("Top Projects by Attendance % (table + labeled chart)")
-
 if col_proj and "SessionAttended" in f.columns and "Total" in f.columns:
     p = f.groupby(col_proj)[["SessionAttended", "Total"]].sum().reset_index()
     p["AttendancePct"] = np.where(p["Total"] > 0, (p["SessionAttended"] / p["Total"]) * 100, np.nan)
