@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+from datetime import datetime
 
 # ============================================================
 # Session Visits Dashboard - V1
@@ -46,9 +47,6 @@ def bar_with_labels(data, x_col, y_col, x_title, y_title):
     )
     return bar + text
 
-# -----------------------------
-# FIXED BUCKET FUNCTION (0–7+)
-# -----------------------------
 def bucket_0_to_7_plus(series):
     s = pd.to_numeric(series, errors="coerce").fillna(0).clip(lower=0)
     bins = [-0.1, 0, 1, 2, 3, 4, 5, 6, np.inf]
@@ -56,6 +54,18 @@ def bucket_0_to_7_plus(series):
     return pd.cut(s, bins=bins, labels=labels, include_lowest=True)
 
 BUCKET_0_7_ORDER = ["0", "1", "2", "3", "4", "5", "6", "7+"]
+
+def add_export_footer_rows(df_out: pd.DataFrame, notes: list[str]) -> pd.DataFrame:
+    """
+    Add blank line + footer rows at bottom so that when exporting to Excel/CSV,
+    the export timestamp and filter selections are clearly visible.
+    """
+    # Create a single-column footer dataframe and then align columns
+    footer = pd.DataFrame({df_out.columns[0]: [""] + notes})
+    # Add remaining columns as blanks
+    for c in df_out.columns[1:]:
+        footer[c] = ""
+    return pd.concat([df_out, footer], ignore_index=True)
 
 # -----------------------------
 # CENTERED TITLE
@@ -136,6 +146,11 @@ for mc in metric_cols:
 st.sidebar.header("Filters")
 f = df.copy()
 
+# keep filter selections for export footer
+sel_state = "All"
+sel_progsub = "All"
+sel_gender = "All"
+
 if col_state:
     states = sorted(f[col_state].dropna().unique())
     sel_state = st.sidebar.selectbox("StateName", ["All"] + states)
@@ -203,14 +218,27 @@ for mc in metric_cols:
     st.divider()
 
 # -----------------------------
-# Export
+# Export (with export date + filter selections in footer)
 # -----------------------------
 st.subheader("Export")
 
+export_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+footer_notes = [
+    f"Export Timestamp: {export_ts}",
+    f"Filters Applied - StateName: {sel_state}",
+    f"Filters Applied - ProgramSubType: {sel_progsub}",
+    f"Filters Applied - Gender: {sel_gender}",
+]
+
+# Prepare CSV with footer rows
+f_export = add_export_footer_rows(f.copy(), footer_notes)
+csv_bytes = f_export.to_csv(index=False).encode("utf-8")
+
 st.download_button(
-    "Download filtered data (CSV)",
-    data=f.to_csv(index=False),
-    file_name="session_visits_dashboard_v1.csv",
+    "Download filtered data (CSV) with export details at bottom",
+    data=csv_bytes,
+    file_name="session_visits_dashboard_v1_filtered.csv",
     mime="text/csv",
 )
 
@@ -218,5 +246,5 @@ st.download_button(
 # Raw Data
 # -----------------------------
 if show_raw:
-    st.subheader("Raw Data")
+    st.subheader("Raw Data (Filtered)")
     st.dataframe(f, use_container_width=True)
