@@ -50,11 +50,8 @@ def bar_with_labels(data, x_col, y_col, x_title, y_title):
 # FIXED BUCKET FUNCTION (0–7+)
 # -----------------------------
 def bucket_0_to_7_plus(series):
-    """
-    Buckets: 0,1,2,3,4,5,6,7+
-    """
     s = pd.to_numeric(series, errors="coerce").fillna(0).clip(lower=0)
-    bins = [-0.1, 0, 1, 2, 3, 4, 5, 6, np.inf]   # 9 edges
+    bins = [-0.1, 0, 1, 2, 3, 4, 5, 6, np.inf]
     labels = ["0", "1", "2", "3", "4", "5", "6", "7+"]
     return pd.cut(s, bins=bins, labels=labels, include_lowest=True)
 
@@ -83,7 +80,8 @@ df.columns = [c.strip() for c in df.columns]
 # -----------------------------
 col_state = pick_col(df, ["StateName", "State"])
 col_gender = pick_col(df, ["Gender"])
-col_child = pick_col(df, ["ChildId", "ChildID"])
+col_child = pick_col(df, ["ChildId", "ChildID", "Child", "Child_ID"])
+col_progsub = pick_col(df, ["ProgramSubType", "Program Sub Type", "ProgramSubTypeName"])
 
 metric_cols = [
     "NumeracySessions",
@@ -101,21 +99,25 @@ df = safe_numeric(df, ["SessionAttended", "Total"] + metric_cols)
 # -----------------------------
 st.subheader("Upload Summary")
 
-c1, c2 = st.columns(2)
-c1.metric("Total Submissions (Rows)", f"{len(df):,}")
-c2.metric("Unique States", df[col_state].nunique() if col_state else "NA")
+total_rows = len(df)
+total_children = df[col_child].nunique() if col_child else np.nan
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Submissions (Rows)", f"{total_rows:,}")
+c2.metric("Total Children (Unique)", f"{int(total_children):,}" if not np.isnan(total_children) else "NA")
+c3.metric("Unique States", df[col_state].nunique() if col_state else "NA")
 
 if col_state:
-    st.markdown("### StateName-wise Submissions")
+    st.markdown("### StateName-wise Submissions (Rows)")
     st.dataframe(
-        df[col_state].value_counts().reset_index(name="Rows"),
+        df[col_state].value_counts(dropna=False).reset_index(name="Rows").rename(columns={"index": "StateName"}),
         use_container_width=True
     )
 
 if col_gender:
-    st.markdown("### Gender-wise Submissions")
+    st.markdown("### Gender-wise Submissions (Rows)")
     st.dataframe(
-        df[col_gender].value_counts().reset_index(name="Rows"),
+        df[col_gender].value_counts(dropna=False).reset_index(name="Rows").rename(columns={"index": "Gender"}),
         use_container_width=True
     )
 
@@ -140,6 +142,12 @@ if col_state:
     if sel_state != "All":
         f = f[f[col_state] == sel_state]
 
+if col_progsub:
+    progsubs = sorted(f[col_progsub].dropna().unique())
+    sel_progsub = st.sidebar.selectbox("ProgramSubType", ["All"] + progsubs)
+    if sel_progsub != "All":
+        f = f[f[col_progsub] == sel_progsub]
+
 if col_gender:
     genders = sorted(f[col_gender].dropna().unique())
     sel_gender = st.sidebar.selectbox("Gender", ["All"] + genders)
@@ -149,15 +157,15 @@ if col_gender:
 show_raw = st.sidebar.checkbox("Show raw data")
 
 # -----------------------------
-# KPIs
+# KPIs (Filtered)
 # -----------------------------
 st.subheader("Key Metrics (Filtered)")
 
-k1, k2, k3 = st.columns(3)
-
-k1.metric("Records", f"{len(f):,}")
-k2.metric("Unique Children", f[col_child].nunique() if col_child else "NA")
-k3.metric("Avg SessionAttended", f["SessionAttended"].mean().round(2) if "SessionAttended" in f else "NA")
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Total Submissions (Rows)", f"{len(f):,}")
+k2.metric("Total Children (Unique)", f"{f[col_child].nunique():,}" if col_child else "NA")
+k3.metric("Unique States", f[col_state].nunique() if col_state else "NA")
+k4.metric("Avg SessionAttended", f["SessionAttended"].mean().round(2) if "SessionAttended" in f else "NA")
 
 st.divider()
 
